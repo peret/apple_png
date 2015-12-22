@@ -6,9 +6,7 @@ by Marvin Killing
 
 Reads Apple's PNG format and converts it to plain PNG. This is useful when you're working with iOS .ipa packages from within Ruby.
 
-This is an extension written in C, which runs about 100x faster than a similar approach in Ruby.
-
-Tested on Ubuntu Oneiric and Mountain Lion. Not tested on Windows, but making it work there should not be too hard.
+This just calls the Apple utility pngcrush (Xcode Tools probably need to be installed) to remove the iOS PNG optimizations.
 
 ## USAGE
 
