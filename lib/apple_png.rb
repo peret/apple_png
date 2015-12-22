@@ -131,7 +131,7 @@ class ApplePng
       out = header_data
       chunks.each do |chunk|
         next if chunk['type'] == 'CgBI'
-        logger.debug "Writing #{chunk['type']}" if logger
+        # logger.debug "Writing #{chunk['type']}" if logger
 
         out += [chunk['length']].pack("L>")
         out += chunk['type']
