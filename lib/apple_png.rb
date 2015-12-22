@@ -1,3 +1,5 @@
+require 'apple_png/apple_png'
+
 class NotValidApplePngError < StandardError; end
 
 class ApplePng
