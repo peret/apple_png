@@ -13,7 +13,6 @@ class ApplePng
   # Create a new ApplePng instance from Apple PNG data in a string
   # @param apple_png_data [String] Binary string containing Apple PNG data, probably read from a file
   def initialize(apple_png_data)
-    puts "HEEEELLLOO"
     self.get_dimensions(apple_png_data)
     @raw_data = apple_png_data
   end

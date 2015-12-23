@@ -373,9 +373,6 @@ void applyRowFilters (int wide, int high, unsigned char *data)
 
 int process (char *filename)
 {
-    printf("process called with filename: %s\n", filename);
-    VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
-
     FILE *f;
     unsigned int length;
     int i;
@@ -1320,7 +1317,6 @@ Get the width and height from PNG data without actually converting it.
 @param data [String] Binary string containing Apple PNG data
 */
 static VALUE ApplePng_get_dimensions(VALUE self, VALUE data) {
-    printf("apple png get dimensions called");
     VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
     const char *oldPNG = StringValuePtr(data);
     size_t oldPNG_length = RSTRING_LEN(data);
@@ -1357,9 +1353,7 @@ Convert an Apple PNG data string to a standard PNG data string
 @return [String] Binary string containing standard PNG data
 */
 static VALUE ApplePng_convert_apple_png(VALUE self, VALUE filename, VALUE outSuffix) {
-    printf("convert_apple_png called with filename:\n");
     suffix = StringValuePtr(outSuffix);
-    // printf("%s\n", outputPath);
     process(StringValuePtr(filename));
 }
 
