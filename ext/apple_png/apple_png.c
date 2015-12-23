@@ -9,7 +9,7 @@
 #include "miniz.h"
 
 #define PNG_HEADER "\x89PNG\r\n\x1a\n"
-
+#define PNG_BYTES2UINT(char_ptr) (ntohl(*(uint32_t *)(char_ptr)))
 
 /** Global flags, set on the command line **/
 int flag_Verbose = 0;
