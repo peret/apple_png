@@ -426,7 +426,7 @@ int process (char *filename)
     f = fopen (filename, "rb");
     if (!f)
     {
-        rb_raise(eNotValidApplePng, "%s : not found or could not be opened", filename);
+        printf ("%s : not found or could not be opened\n", filename);
         return 0;
     }
 
@@ -439,7 +439,7 @@ int process (char *filename)
     fread (buf,1,8, f); i += 8;
     if (memcmp (buf, png_magic_bytes, 8))
     {
-        rb_raise(eNotValidApplePng, "%s : not a PNG file", filename);
+        printf ("%s : not a PNG file\n", filename);
         fclose (f);
         return 0;
     }
@@ -449,9 +449,9 @@ int process (char *filename)
         fclose (f);
         switch (result)
         {
-            case -1: rb_raise(eNotValidApplePng, "%s : invalid chunk size", filename); break;
-            case -2: rb_raise(eNotValidApplePng, "%s : out of memory", filename); break;
-            case -3: rb_raise(eNotValidApplePng, "%s : premature end of file", filename); break;
+            case -1: printf ("%s : invalid chunk size\n", filename); break;
+            case -2: printf ("%s : out of memory\n", filename); break;
+            case -3: printf ("%s : premature end of file\n", filename); break;
         }
         reset_chunks ();
         return 0;
@@ -461,7 +461,7 @@ int process (char *filename)
     if (pngChunks[0].id != 0x43674249)  /* "CgBI" */
     {
         isPhoney = 0;
-        rb_raise(eNotValidApplePng, "%s : not an -iphone crushed PNG file", filename);
+        printf ("%s : not an -iphone crushed PNG file\n", filename);
         if (!flag_Process_Anyway)
         {
             fclose (f);
@@ -510,7 +510,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "missing IEND chunk", filename);
+        printf ("missing IEND chunk\n");
         reset_chunks ();
         return 0;
     }
@@ -540,7 +540,7 @@ int process (char *filename)
             printf ("    chunk : %c%c%c%c  length %6u  CRC32 %08X", (pngChunks[i].id >> 24) & 0xff,(pngChunks[i].id >> 16) & 0xff, (pngChunks[i].id >> 8) & 0xff,pngChunks[i].id & 0xff, pngChunks[i].length, pngChunks[i].crc32);
             crc = crc32s (pngChunks[i].data, pngChunks[i].length+4);
             if (pngChunks[i].crc32 != crc)
-                rb_raise(eNotValidApplePng, " --> CRC32 check invalid! Should be %08X", crc);
+                printf (" --> CRC32 check invalid! Should be %08X", crc);
             printf ("\n");
         }
     } else
@@ -581,7 +581,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "no IHDR chunk found");
+        printf ("no IHDR chunk found\n");
         reset_chunks ();
         return 0;
     }
@@ -594,7 +594,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "IHDR chunk length incorrect");
+        printf ("IHDR chunk length incorrect\n");
         reset_chunks ();
         return 0;
     }
@@ -617,7 +617,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "image dimensions invalid");
+        printf ("image dimensions invalid\n");
         reset_chunks ();
         return 0;
     }
@@ -630,7 +630,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "unknown compression type %d", compression);
+        printf ("unknown compression type %d\n", compression);
         reset_chunks ();
         return 0;
     }
@@ -643,7 +643,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "unknown filter type %d", filter);
+        printf ("unknown filter type %d\n", filter);
         reset_chunks ();
         return 0;
     }
@@ -656,7 +656,7 @@ int process (char *filename)
             didShowName = 1;
             printf ("%s : ", filename);
         }
-        rb_raise(eNotValidApplePng, "unknown interlace type %d", interlace);
+        printf ("unknown interlace type %d\n", interlace);
         reset_chunks ();
         return 0;
     }
