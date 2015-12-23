@@ -1,357 +1,1308 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/types.h>
+
 #include <ruby.h>
-#include <zlib.h>
-#include <arpa/inet.h>
-#include "dyn_arr.h"
+
+#include "miniz.h"
 
 #define PNG_HEADER "\x89PNG\r\n\x1a\n"
-#define PNG_BYTES2UINT(char_ptr) (ntohl(*(uint32_t *)(char_ptr)))
 
-#define DIV_CEIL(a,b) (((a) + (b) - 1) / (b))
 
-#define APPLE_PNG_OK 0
-#define APPLE_PNG_STREAM_ERROR Z_STREAM_ERROR
-#define APPLE_PNG_DATA_ERROR Z_DATA_ERROR
-#define APPLE_PNG_ZLIB_VERSION_ERROR Z_VERSION_ERROR
-#define APPLE_PNG_NO_MEM_ERROR Z_MEM_ERROR
+/** Global flags, set on the command line **/
+int flag_Verbose = 0;
+int flag_Process_Anyway = 0;
+int flag_List_Chunks = 0;
+int flag_Debug = 0;
+int flag_UpdateAlpha = 1;
+int repack_IDAT_size = 524288;  /* 512K -- seems a bit much to me, axually, but have seen this used */
 
-/* calculate how many scanlines an adam7 interlaced png will result in */
-static uint32_t interlaced_count_scanlines(uint32_t width, uint32_t height) {
-    uint32_t pass[7];
+int flag_Rewrite = 0;
 
-    if (width == 0 || height == 0) return 0;
+char *suffix = NULL;
+char *outputPath = NULL;
 
-    /* For each pass, calculate how many resulting scanlines there will be.
-     * I'm sure there is a more elegant solution to accomplish this.
-     * This makes use of the adam7 raster:
-     * 1 6 4 6 2 6 4 6
-     * 7 7 7 7 7 7 7 7
-     * 5 6 5 6 5 6 5 6
-     * 7 7 7 7 7 7 7 7
-     * 3 6 4 6 3 6 4 6
-     * 7 7 7 7 7 7 7 7
-     * 5 6 5 6 5 6 5 6
-     * 7 7 7 7 7 7 7 7
-    */
-    pass[0] = DIV_CEIL(height, 8u);
-    pass[1] = (width > 4) ? DIV_CEIL(height, 8u) : 0;
-    pass[2] = DIV_CEIL(height-4, 8u);
-    pass[3] = (width > 2) ? DIV_CEIL(height, 4u) : 0;
-    pass[4] = DIV_CEIL(height-2, 4u);
-    pass[5] = (width > 1) ? DIV_CEIL(height, 2u) : 0;
-    pass[6] = DIV_CEIL(height-1, 2u);
+unsigned char png_magic_bytes[] = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A";
 
-    return pass[0] + pass[1] + pass[2] + pass[3] + pass[4] + pass[5] + pass[6];
+/** Chunk data comes here **/
+
+struct chunk_t {
+    unsigned int length;
+    unsigned int id;
+    unsigned char *data;
+    unsigned int crc32;
+};
+
+int num_chunks = 0;
+int max_chunks = 0;
+
+struct chunk_t *pngChunks = NULL;
+
+
+/** CRC32 generator for a block of data, thanks to Marc Autret
+    (he wrote this original code in Javascript for use in InDesign!) **/
+
+unsigned int CRC_256[] = {
+    0, 0x77073096, 0xee0e612c, 0x990951ba, 0x76dc419, 0x706af48f, 0xe963a535, 0x9e6495a3, 0xedb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988, 0x9b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91,
+    0x1db71064, 0x6ab020f2, 0xf3b97148, 0x84be41de, 0x1adad47d, 0x6ddde4eb, 0xf4d4b551, 0x83d385c7, 0x136c9856, 0x646ba8c0, 0xfd62f97a, 0x8a65c9ec, 0x14015c4f, 0x63066cd9, 0xfa0f3d63, 0x8d080df5,
+    0x3b6e20c8, 0x4c69105e, 0xd56041e4, 0xa2677172, 0x3c03e4d1, 0x4b04d447, 0xd20d85fd, 0xa50ab56b, 0x35b5a8fa, 0x42b2986c, 0xdbbbc9d6, 0xacbcf940, 0x32d86ce3, 0x45df5c75, 0xdcd60dcf, 0xabd13d59,
+    0x26d930ac, 0x51de003a, 0xc8d75180, 0xbfd06116, 0x21b4f4b5, 0x56b3c423, 0xcfba9599, 0xb8bda50f, 0x2802b89e, 0x5f058808, 0xc60cd9b2, 0xb10be924, 0x2f6f7c87, 0x58684c11, 0xc1611dab, 0xb6662d3d,
+    0x76dc4190, 0x1db7106, 0x98d220bc, 0xefd5102a, 0x71b18589, 0x6b6b51f, 0x9fbfe4a5, 0xe8b8d433, 0x7807c9a2, 0xf00f934, 0x9609a88e, 0xe10e9818, 0x7f6a0dbb, 0x86d3d2d, 0x91646c97, 0xe6635c01,
+    0x6b6b51f4, 0x1c6c6162, 0x856530d8, 0xf262004e, 0x6c0695ed, 0x1b01a57b, 0x8208f4c1, 0xf50fc457, 0x65b0d9c6, 0x12b7e950, 0x8bbeb8ea, 0xfcb9887c, 0x62dd1ddf, 0x15da2d49, 0x8cd37cf3, 0xfbd44c65,
+    0x4db26158, 0x3ab551ce, 0xa3bc0074, 0xd4bb30e2, 0x4adfa541, 0x3dd895d7, 0xa4d1c46d, 0xd3d6f4fb, 0x4369e96a, 0x346ed9fc, 0xad678846, 0xda60b8d0, 0x44042d73, 0x33031de5, 0xaa0a4c5f, 0xdd0d7cc9,
+    0x5005713c, 0x270241aa, 0xbe0b1010, 0xc90c2086, 0x5768b525, 0x206f85b3, 0xb966d409, 0xce61e49f, 0x5edef90e, 0x29d9c998, 0xb0d09822, 0xc7d7a8b4, 0x59b33d17, 0x2eb40d81, 0xb7bd5c3b, 0xc0ba6cad,
+    0xedb88320, 0x9abfb3b6, 0x3b6e20c, 0x74b1d29a, 0xead54739, 0x9dd277af, 0x4db2615, 0x73dc1683, 0xe3630b12, 0x94643b84, 0xd6d6a3e, 0x7a6a5aa8, 0xe40ecf0b, 0x9309ff9d, 0xa00ae27, 0x7d079eb1,
+    0xf00f9344, 0x8708a3d2, 0x1e01f268, 0x6906c2fe, 0xf762575d, 0x806567cb, 0x196c3671, 0x6e6b06e7, 0xfed41b76, 0x89d32be0, 0x10da7a5a, 0x67dd4acc, 0xf9b9df6f, 0x8ebeeff9, 0x17b7be43, 0x60b08ed5,
+    0xd6d6a3e8, 0xa1d1937e, 0x38d8c2c4, 0x4fdff252, 0xd1bb67f1, 0xa6bc5767, 0x3fb506dd, 0x48b2364b, 0xd80d2bda, 0xaf0a1b4c, 0x36034af6, 0x41047a60, 0xdf60efc3, 0xa867df55, 0x316e8eef, 0x4669be79,
+    0xcb61b38c, 0xbc66831a, 0x256fd2a0, 0x5268e236, 0xcc0c7795, 0xbb0b4703, 0x220216b9, 0x5505262f, 0xc5ba3bbe, 0xb2bd0b28, 0x2bb45a92, 0x5cb36a04, 0xc2d7ffa7, 0xb5d0cf31, 0x2cd99e8b, 0x5bdeae1d,
+    0x9b64c2b0, 0xec63f226, 0x756aa39c, 0x26d930a, 0x9c0906a9, 0xeb0e363f, 0x72076785, 0x5005713, 0x95bf4a82, 0xe2b87a14, 0x7bb12bae, 0xcb61b38, 0x92d28e9b, 0xe5d5be0d, 0x7cdcefb7, 0xbdbdf21,
+    0x86d3d2d4, 0xf1d4e242, 0x68ddb3f8, 0x1fda836e, 0x81be16cd, 0xf6b9265b, 0x6fb077e1, 0x18b74777, 0x88085ae6, 0xff0f6a70, 0x66063bca, 0x11010b5c, 0x8f659eff, 0xf862ae69, 0x616bffd3, 0x166ccf45,
+    0xa00ae278, 0xd70dd2ee, 0x4e048354, 0x3903b3c2, 0xa7672661, 0xd06016f7, 0x4969474d, 0x3e6e77db, 0xaed16a4a, 0xd9d65adc, 0x40df0b66, 0x37d83bf0, 0xa9bcae53, 0xdebb9ec5, 0x47b2cf7f, 0x30b5ffe9,
+    0xbdbdf21c, 0xcabac28a, 0x53b39330, 0x24b4a3a6, 0xbad03605, 0xcdd70693, 0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94, 0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d
+};
+
+int crc32s (unsigned char *buf, int buf_length)
+{
+    unsigned int c = 0xffffffff;
+    int i;
+    for (i=0; i < buf_length; i++ )
+        c = CRC_256[(c ^ buf[i]) & 0xff] ^ (c >> 8);
+
+    return (c ^ 0xffffffff);
+};
+
+int get_long (FILE *f)
+{
+    return (fgetc(f)<<24) + (fgetc(f)<<16) + (fgetc(f)<<8) + fgetc(f);
 }
 
-/* inflate from apple png file, don't expect headers */
-static int png_inflate(unsigned char *data, uint32_t length, uint32_t width, uint32_t height, int interlaced, unsigned char **out_buff, uint32_t *out_uncompressed_size) {
-    int error;
-    z_stream inflate_strm = {0};
-
-    if (interlaced) {
-        *out_uncompressed_size = interlaced_count_scanlines(width, height) + width * height * 4;
-    } else {
-        *out_uncompressed_size = height + width * height * 4;
-    }
-
-    *out_buff = malloc(sizeof(char) * (*out_uncompressed_size));
-    if (*out_buff == 0) {
-        return APPLE_PNG_NO_MEM_ERROR;
-    }
-
-    inflate_strm.data_type = Z_BINARY;
-    inflate_strm.avail_in = length;
-    inflate_strm.next_in = (Bytef *)data;
-    inflate_strm.avail_out = *out_uncompressed_size;
-    inflate_strm.next_out = (Bytef *)*out_buff;
-
-    error = inflateInit2(&inflate_strm, -15);
-    if (error != Z_OK) {
-        free(*out_buff);
-        return error;
-    }
-    error = inflate(&inflate_strm, Z_FINISH);
-    if (error != Z_OK && error != Z_STREAM_END) {
-        free (*out_buff);
-        return error;
-    }
-    error = inflateEnd(&inflate_strm);
-    if (error != Z_OK) {
-        free(*out_buff);
-        return error;
-    }
-
-    return APPLE_PNG_OK;
+int get_short (FILE *f)
+{
+    return (fgetc(f)<<8) + fgetc(f);
 }
 
-/* deflate for standard png file */
-static int png_deflate(unsigned char *data, uint32_t length, unsigned char **out_buff, uint32_t *out_compressed_size) {
-    int error;
-    uint32_t sizeEstimate;
-    z_stream deflate_strm = {0};
-    deflate_strm.avail_in = length;
-    deflate_strm.next_in = (Bytef *)data;
-
-    error = deflateInit(&deflate_strm, Z_DEFAULT_COMPRESSION);
-    if (error != Z_OK) {
-        return error;
-    }
-
-    sizeEstimate = (uint32_t)deflateBound(&deflate_strm, length);
-    *out_buff = malloc(sizeof(unsigned char) * sizeEstimate);
-    if (*out_buff == 0) {
-        free(*out_buff);
-        return APPLE_PNG_NO_MEM_ERROR;
-    }
-
-    deflate_strm.avail_out = (uint32_t)sizeEstimate;
-    deflate_strm.next_out = *out_buff;
-
-    error = deflate(&deflate_strm, Z_FINISH);
-    if (error != Z_OK && error != Z_STREAM_END) {
-        free(*out_buff);
-        return error;
-    }
-    error = deflateEnd(&deflate_strm);
-    if (error != Z_OK) {
-        free(*out_buff);
-        return error;
-    }
-
-    *out_compressed_size = (uint32_t)deflate_strm.total_out;
-
-    return APPLE_PNG_OK;
+int read_long (void *src)
+{
+    return (((unsigned char *)src)[0]<<24) + (((unsigned char *)src)[1]<<16) + (((unsigned char *)src)[2]<<8) + ((unsigned char *)src)[3];
 }
 
-static void flip_colors(unsigned char *pixelData, size_t index) {
-    char tmp = pixelData[index];
-    pixelData[index] = pixelData[index + 2];
-    pixelData[index + 2] = tmp;
+
+int init_chunk (FILE *f, unsigned int filelength)
+{
+    struct chunk_t one_chunk;
+    unsigned char buf[8];
+
+    if (fread (buf, 1,4, f) != 4)
+    {
+        if (feof(f))
+            return 0;
+        if (flag_Debug)
+            printf ("    informational : failed to read chunk length\n");
+        return -3;
+    }
+
+    one_chunk.length = (buf[0] << 24) + (buf[1] << 16) + (buf[2] << 8) + buf[3];
+
+    if (one_chunk.length > filelength-4)
+    {
+        if (flag_Debug)
+            printf ("    informational : chunk length %u larger than file\n", one_chunk.length);
+        return -1;
+    }
+
+    one_chunk.data = (unsigned char *)malloc (one_chunk.length+4);
+    if (one_chunk.data == NULL)
+    {
+        if (flag_Debug)
+            printf ("    informational : no memory for chunk length %u\n", one_chunk.length);
+        return -2;
+    }
+    if (fread (one_chunk.data, 1, one_chunk.length+4, f) != one_chunk.length+4)
+    {
+        if (flag_Debug)
+            printf ("    informational : failed to read chunk length %u\n", one_chunk.length);
+        return -3;
+    }
+    one_chunk.id = (one_chunk.data[0] << 24) + (one_chunk.data[1] << 16) + (one_chunk.data[2] << 8) + one_chunk.data[3];
+
+    if (fread (buf, 1,4, f) != 4)
+    {
+        if (flag_Debug)
+            printf ("    informational : failed to read chunk crc32\n");
+        return -3;
+    }
+    one_chunk.crc32 = (buf[0] << 24) + (buf[1] << 16) + (buf[2] << 8) + buf[3];
+
+    if (num_chunks >= max_chunks)
+    {
+        max_chunks += 8;
+        if (pngChunks == NULL)
+            pngChunks = (struct chunk_t *)malloc (max_chunks * sizeof(struct chunk_t));
+        else
+            pngChunks = (struct chunk_t *)realloc (pngChunks, max_chunks * sizeof(struct chunk_t));
+    }
+    pngChunks[num_chunks].id = one_chunk.id;
+    pngChunks[num_chunks].length = one_chunk.length;
+    pngChunks[num_chunks].data = one_chunk.data;
+    pngChunks[num_chunks].crc32 = one_chunk.crc32;
+    num_chunks++;
+
+    return 0;
 }
 
-/* flip first and third color in uncompressed png pixel data */
-static void flip_color_bytes(unsigned char *pixelData, uint32_t width, uint32_t height) {
-    uint32_t x, y;
-    size_t i = 0;
+void reset_chunks (void)
+{
+    int i;
 
-    for (y = 0; y < height; y++) {
-        i += 1;
-        for (x = 0; x < width; x++) {
-            flip_colors(pixelData, i);
-            i += 4;
+    for (i=0; i<num_chunks; i++)
+    {
+        if (pngChunks[i].length && pngChunks[i].data)
+        {
+            free (pngChunks[i].data);
+            pngChunks[i].data = NULL;
         }
     }
+    num_chunks = 0;
 }
 
-static void interlaced_flip_color_bytes(unsigned char *pixelData, uint32_t width, uint32_t height) {
-    uint32_t x, y;
-    size_t i = 0;
+void demultiplyAlpha (int wide, int high, unsigned char *data)
+{
+    int x,y;
+    unsigned char *srcPtr;
 
-    // pass 1
-    for (y = 0; y < height; y += 8) {
-        i += 1;
-        for (x = 0; x < width; x += 8) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
+    srcPtr = data;
 
-    // pass 2
-    for (y = 0; y < height; y += 8) {
-        i += 1;
-        for (x = 5; x < width; x += 8) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-
-    // pass 3
-    for (y = 4; y < height; y += 8) {
-        i += 1;
-        for (x = 0; x < width; x += 4) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-
-    // pass 4
-    for (y = 0; y < height; y += 4) {
-        i += 1;
-        for (x = 2; x < width; x += 4) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-
-    // pass 5
-    for (y = 2; y < height; y += 4) {
-        i += 1;
-        for (x = 0; x < width; x += 2) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-
-    // pass 6
-    for (y = 0; y < height; y += 2) {
-        i += 1;
-        for (x = 1; x < width; x += 2) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-
-    // pass 7
-    for (y = 1; y < height; y += 2) {
-        i += 1;
-        for (x = 0; x < width; x++) {
-            flip_colors(pixelData, i);
-            i += 4;
-        }
-    }
-}
-
-/* calculate chunk checksum out of chunk type and chunk data */
-static uint32_t png_crc32(const char *chunkType, const char *chunkData, uint32_t chunkLength) {
-    unsigned long running_crc = crc32(0, 0, 0);
-    running_crc = crc32(running_crc, (Bytef *)chunkType, 4);
-    running_crc = crc32(running_crc, (Bytef *)chunkData, chunkLength);
-    return (uint32_t)((running_crc + 0x100000000) % 0x100000000);
-}
-
-/* extract chunks from PNG data */
-static int readPngChunks(VALUE self, const char *oldPNG, size_t oldPngLength, dyn_arr *newPNG) {
-    uint32_t width = 0, height = 0;
-    int interlaced = 0;
-    size_t cursor = 8;
-    dyn_arr *applePngCompressedPixelData = dyn_arr_create(oldPngLength);
-    if (applePngCompressedPixelData == 0) {
-        return APPLE_PNG_NO_MEM_ERROR;
-    }
-
-    while (cursor < oldPngLength) {
-        int breakLoop = 0;
-        const char *chunkLength_raw = &oldPNG[cursor];
-        uint32_t chunkLength = PNG_BYTES2UINT(chunkLength_raw);
-        const char *chunkType = &oldPNG[cursor + 4];
-        const char *chunkData = &oldPNG[cursor + 8];
-        const char *chunkCRC_raw = &oldPNG[cursor + 8 + chunkLength];
-        cursor += chunkLength + 12;
-
-        if (strncmp(chunkType, "IHDR", 4) == 0) {
-            /* extract dimensions from header */
-            width = PNG_BYTES2UINT(&chunkData[0]);
-            height = PNG_BYTES2UINT(&chunkData[4]);
-            interlaced = chunkData[12] == 1;
-            rb_funcall(self, rb_intern("width="), 1, INT2NUM(width));
-            rb_funcall(self, rb_intern("height="), 1, INT2NUM(height));
-        } else if (strncmp(chunkType, "IDAT", 4) == 0) {
-            /* collect pixel data to process it once an IEND chunk appears */
-            dyn_arr_append(applePngCompressedPixelData, chunkData, chunkLength);
-            continue;
-        } else if (strncmp(chunkType, "CgBI", 4) == 0) {
-            /* don't write CgBI chunks to the output png  */
-            continue;
-        } else if (strncmp(chunkType, "IEND", 4) == 0) {
-            /* all png data has been procssed, now flip the color bytes */
-            unsigned char *decompressedPixelData, *standardPngCompressedPixelData;
-            uint32_t compressed_size, uncompressed_size;
-            uint32_t chunkCRC;
-            uint32_t tmp_chunkLength, tmp_chunkCRC;
-            int error;
-
-            /* decompress, flip color bytes, then compress again */
-            error = png_inflate((unsigned char *)applePngCompressedPixelData->arr, (uint32_t)applePngCompressedPixelData->used, width, height, interlaced, &decompressedPixelData, &uncompressed_size);
-            if (error != APPLE_PNG_OK) {
-                dyn_arr_free(applePngCompressedPixelData);
-                return error;
+    for (y=0; y<high; y++)
+    {
+        /* skip rowfilter -- it's assumed to be 0 here anyway! */
+        srcPtr++;
+        for (x=0; x<4*wide; x+=4)
+        {
+            if (srcPtr[x+3])
+            {
+                srcPtr[x] = (srcPtr[x]*255+(srcPtr[x+3]>>1))/srcPtr[x+3];
+                srcPtr[x+1] = (srcPtr[x+1]*255+(srcPtr[x+3]>>1))/srcPtr[x+3];
+                srcPtr[x+2] = (srcPtr[x+2]*255+(srcPtr[x+3]>>1))/srcPtr[x+3];
             }
-
-            if (interlaced) {
-                interlaced_flip_color_bytes(decompressedPixelData, width, height);
-            } else {
-                flip_color_bytes(decompressedPixelData, width, height);
-            }
-
-            error = png_deflate(decompressedPixelData, uncompressed_size, &standardPngCompressedPixelData, &compressed_size);
-            if (error != APPLE_PNG_OK) {
-                dyn_arr_free(applePngCompressedPixelData);
-                return error;
-            }
-
-            /* clean up temporary data structures */
-            dyn_arr_free(applePngCompressedPixelData);
-            free(decompressedPixelData);
-
-            /* write the pixel data to the output PNG as IDAT chunk */
-            chunkType = "IDAT";
-            chunkLength = compressed_size;
-            tmp_chunkLength = htonl(chunkLength);
-            chunkLength_raw = (char*)(&tmp_chunkLength);
-            chunkData = (char*)standardPngCompressedPixelData;
-            chunkCRC = png_crc32(chunkType, chunkData, chunkLength);
-            tmp_chunkCRC = htonl(chunkCRC);
-            chunkCRC_raw = (char *)(&tmp_chunkCRC);
-
-            /* we're done */
-            breakLoop = 1;
         }
+        srcPtr += 4*wide;
+    }
+}
 
-        /* write the chunk to the output png */
-        dyn_arr_append(newPNG, chunkLength_raw, 4);
-        dyn_arr_append(newPNG, chunkType, 4);
-        dyn_arr_append(newPNG, chunkData, chunkLength);
-        dyn_arr_append(newPNG, chunkCRC_raw, 4);
+void removeRowFilters (int wide, int high, unsigned char *data)
+{
+    int x,y, rowfilter;
+    unsigned char *srcPtr, *upPtr;
 
-        if (breakLoop) {
+    srcPtr = data;
+
+    for (y=0; y<high; y++)
+    {
+        rowfilter = *srcPtr;
+        /*  Need to save original filter for re-applying! */
+        /*  *srcPtr = 0; */
+        srcPtr++;
+        switch (rowfilter)
+        {
+            case 0: // None
+                break;
+            case 1: // Sub
+                for (x=4; x<4*wide; x++)
+                {
+                    srcPtr[x] += srcPtr[x-4];
+                }
+                break;
+            case 2: // Up
+                upPtr = srcPtr - 4*wide - 1;
+                if (y > 0)
+                {
+                    for (x=0; x<4*wide; x++)
+                    {
+                        srcPtr[x] += upPtr[x];
+                    }
+                }
+                break;
+            case 3: // Average
+                upPtr = srcPtr - 4*wide - 1;
+                if (y == 0)
+                {
+                    for (x=4; x<4*wide; x++)
+                    {
+                        srcPtr[x] += (srcPtr[x-4]>>1);
+                    }
+                } else
+                {
+                    srcPtr[0] += (upPtr[x]>>1);
+                    for (x=4; x<4*wide; x++)
+                    {
+                        srcPtr[x] += ((upPtr[x] + srcPtr[x-4])>>1);
+                    }
+                }
+                break;
+            case 4: // Paeth
+                upPtr = srcPtr - 4*wide - 1;
+                {
+                    int p,pa,pb,pc,value;
+                    int leftpix,toppix,topleftpix;
+
+                    for (x=0; x<4*wide; x++)
+                    {
+                        leftpix = 0;
+                        toppix = 0;
+                        topleftpix = 0;
+                        if (x > 0)
+                            leftpix = srcPtr[x-4];
+                        if (y > 0)
+                        {
+                            toppix = upPtr[x];
+                            if (x >= 4)
+                                topleftpix = upPtr[x-4];
+                        }
+                        p = leftpix + toppix - topleftpix;
+                        pa = p - leftpix; if (pa < 0) pa = -pa;
+                        pb = p - toppix; if (pb < 0) pb = -pb;
+                        pc = p - topleftpix; if (pc < 0) pc = -pc;
+                        if (pa <= pb && pa <= pc)
+                            value = leftpix;
+                        else if (pb <= pc)
+                            value = toppix;
+                        else
+                            value = topleftpix;
+
+                        srcPtr[x] += value;
+                    }
+                }
+                break;
+            default:
+                printf ("removerowfilter() : Unknown row filter %d\n", rowfilter);
+        }
+        srcPtr += 4*wide;
+    }
+}
+
+void applyRowFilters (int wide, int high, unsigned char *data)
+{
+    int x,y, rowfilter;
+    unsigned char *srcPtr, *upPtr;
+
+    srcPtr = data;
+
+    for (y=0; y<high; y++)
+    {
+        rowfilter = *srcPtr;
+        srcPtr++;
+        switch (rowfilter)
+        {
+            case 0: // None
+                break;
+            case 1: // Sub
+                for (x=4*wide-1; x>=4; x--)
+                {
+                    srcPtr[x] -= srcPtr[x-4];
+                }
+                break;
+            case 2: // Up
+                if (y > 0)
+                {
+                    upPtr = srcPtr - 1;
+                    for (x=4*wide-1; x>=0; x--)
+                    {
+                        srcPtr[x] -= upPtr[x];
+                    }
+                }
+                break;
+            case 3: // Average
+                upPtr = srcPtr - 4*wide - 1;
+                if (y == 0)
+                {
+                    for (x=4*wide-1; x>=4; x--)
+                    {
+                        srcPtr[x] -= (srcPtr[x-4]>>1);
+                    }
+                } else
+                {
+                    srcPtr[0] -= (upPtr[x]>>1);
+                    for (x=4*wide-1; x>=4; x--)
+                    {
+                        srcPtr[x] -= ((upPtr[x] + srcPtr[x-4])>>1);
+                    }
+                }
+                break;
+            case 4: // Paeth
+                upPtr = srcPtr - 1;
+                {
+                    int p,pa,pb,pc,value;
+                    int leftpix,toppix,topleftpix;
+
+                    for (x=4*wide-1; x>=0; x--)
+                    {
+                        leftpix = 0;
+                        toppix = 0;
+                        topleftpix = 0;
+                        if (x > 0)
+                            leftpix = srcPtr[x-4];
+                        if (y > 0)
+                        {
+                            toppix = upPtr[x];
+                            if (x >= 4)
+                                topleftpix = upPtr[x-4];
+                        }
+                        p = leftpix + toppix - topleftpix;
+                        pa = p - leftpix; if (pa < 0) pa = -pa;
+                        pb = p - toppix; if (pb < 0) pb = -pb;
+                        pc = p - topleftpix; if (pc < 0) pc = -pc;
+                        if (pa <= pb && pa <= pc)
+                            value = leftpix;
+                        else if (pb <= pc)
+                            value = toppix;
+                        else
+                            value = topleftpix;
+
+                        srcPtr[x] -= value;
+                    }
+                }
+                break;
+            default:
+                printf ("applyrowfilter : Unknown row filter %d\n", rowfilter);
+        }
+        srcPtr += 4*wide;
+    }
+}
+
+int process (char *filename)
+{
+    FILE *f;
+    unsigned int length;
+    int i;
+    unsigned char buf[16];
+
+/* This is what we're looking for */
+    int isPhoney = 0;
+
+/* Standard IHDR items: */
+    unsigned int imgwidth, imgheight, bitdepth,colortype, compression, filter, interlace;
+/* Derived IHRD items: */
+    unsigned int bitspp;
+    unsigned int bytespp;
+    unsigned int bytespline;
+
+    struct chunk_t *ihdr_chunk = NULL;
+    int idat_first_index = 0;
+    unsigned char *all_idat = NULL;
+    unsigned int total_idat_size = 0;
+
+/* Adam7 interlacing information */
+    int Starting_Row [] =  { 0, 0, 4, 0, 2, 0, 1 };
+    int Starting_Col [] =  { 0, 4, 0, 2, 0, 1, 0 };
+    int Row_Increment [] = { 8, 8, 8, 4, 4, 2, 2 };
+    int Col_Increment [] = { 8, 8, 4, 4, 2, 2, 1 };
+    int row_filter_bytes = 0;
+
+/* Needed for unpacking/repacking */
+    unsigned char *data_out;
+    int out_length;
+    unsigned char *data_repack = NULL;
+    int repack_size, repack_length;
+
+/* New file name comes here */
+    char *write_file_name = NULL;
+    FILE *write_file;
+    int write_block_size;
+
+/*  int i,j,b;
+    int blocklength, blockid;
+    unsigned int filterbytes;
+    int isInterlaced = 0; */
+
+    int didShowName = 0;
+
+    int crc, result;
+
+    f = fopen (filename, "rb");
+    if (!f)
+    {
+        printf ("%s : not found or could not be opened\n", filename);
+        return 0;
+    }
+
+    fseek (f, 0, SEEK_END);
+    length = ftell (f);
+    fseek (f, 0, SEEK_SET);
+
+    i = 0;
+
+    fread (buf,1,8, f); i += 8;
+    if (memcmp (buf, png_magic_bytes, 8))
+    {
+        printf ("%s : not a PNG file\n", filename);
+        fclose (f);
+        return 0;
+    }
+    result = init_chunk (f, length);
+    if (result < 0)
+    {
+        fclose (f);
+        switch (result)
+        {
+            case -1: printf ("%s : invalid chunk size\n", filename); break;
+            case -2: printf ("%s : out of memory\n", filename); break;
+            case -3: printf ("%s : premature end of file\n", filename); break;
+        }
+        reset_chunks ();
+        return 0;
+    }
+
+    isPhoney = 1;
+    if (pngChunks[0].id != 0x43674249)  /* "CgBI" */
+    {
+        isPhoney = 0;
+        printf ("%s : not an -iphone crushed PNG file\n", filename);
+        if (!flag_Process_Anyway)
+        {
+            fclose (f);
+            reset_chunks ();
+            return 0;
+        }
+        didShowName = 1;
+    }
+
+    do
+    {
+        result = init_chunk (f, length);
+        if (result < 0)
+        {
+            fclose (f);
+
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            switch (result)
+            {
+                case -1: printf ("invalid chunk size\n"); break;
+                case -2: printf ("out of memory\n"); break;
+                case -3: printf ("premature end of file\n"); break;
+                default: printf ("error code %d\n", result);
+            }
+            reset_chunks ();
+            return 0;
+        }
+        if (num_chunks > 0 && pngChunks[num_chunks-1].id == 0x49454E44) /* "IEND" */
+            break;
+    } while (!feof(f));
+
+    if (pngChunks[num_chunks-1].id != 0x49454E44)   /* "IEND" */
+    {
+        fclose (f);
+
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("missing IEND chunk\n");
+        reset_chunks ();
+        return 0;
+    }
+
+    if (fgetc (f) != EOF)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("Extra data after IEND, very suspicious! Excluded from conversion\n");
+    }
+    fclose (f);
+
+    if (flag_List_Chunks)
+    {
+        for (i=0; i<num_chunks; i++)
+        {
+            if (!didShowName)
+            {
+                didShowName = 1;
+                printf ("%s :\n", filename);
+            }
+            printf ("    chunk : %c%c%c%c  length %6u  CRC32 %08X", (pngChunks[i].id >> 24) & 0xff,(pngChunks[i].id >> 16) & 0xff, (pngChunks[i].id >> 8) & 0xff,pngChunks[i].id & 0xff, pngChunks[i].length, pngChunks[i].crc32);
+            crc = crc32s (pngChunks[i].data, pngChunks[i].length+4);
+            if (pngChunks[i].crc32 != crc)
+                printf (" --> CRC32 check invalid! Should be %08X", crc);
+            printf ("\n");
+        }
+    } else
+    {
+        for (i=0; i<num_chunks; i++)
+        {
+            crc = crc32s (pngChunks[i].data, pngChunks[i].length+4);
+            if (pngChunks[i].crc32 != crc)
+            {
+                if (!didShowName)
+                {
+                    didShowName = 1;
+                    printf ("%s :\n", filename);
+                }
+                printf ("    chunk : %c%c%c%c  length %6u  CRC32 %08X", (pngChunks[i].id >> 24) & 0xff,(pngChunks[i].id >> 16) & 0xff, (pngChunks[i].id >> 8) & 0xff,pngChunks[i].id & 0xff, pngChunks[i].length, pngChunks[i].crc32);
+                printf (" -> invalid, changed to %08X\n", crc);
+                pngChunks[i].crc32 = crc;
+            }
+        }
+    }
+
+    if (pngChunks[0].id == 0x43674249)  /* "CgBI" */
+    {
+        if (num_chunks > 0 && pngChunks[1].id == 0x49484452)    /* "IHDR" */
+            ihdr_chunk = &pngChunks[1];
+    } else
+    {
+        if (pngChunks[0].id == 0x49484452)  /* "IHDR" */
+            ihdr_chunk = &pngChunks[0];
+    }
+
+    if (ihdr_chunk == NULL)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("no IHDR chunk found\n");
+        reset_chunks ();
+        return 0;
+    }
+    if (ihdr_chunk->length != 13)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("IHDR chunk length incorrect\n");
+        reset_chunks ();
+        return 0;
+    }
+    imgwidth = read_long (&ihdr_chunk->data[4]);
+    imgheight = read_long (&ihdr_chunk->data[8]);
+    bitdepth = ihdr_chunk->data[12];
+    colortype = ihdr_chunk->data[13];
+    compression = ihdr_chunk->data[14];
+    filter = ihdr_chunk->data[15];
+    interlace = ihdr_chunk->data[16];
+
+    if (imgwidth == 0 || imgheight == 0 || imgwidth > 2147483647 || imgheight > 2147483647)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("image dimensions invalid\n");
+        reset_chunks ();
+        return 0;
+    }
+    if (compression != 0)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("unknown compression type %d\n", compression);
+        reset_chunks ();
+        return 0;
+    }
+    if (filter != 0)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("unknown filter type %d\n", filter);
+        reset_chunks ();
+        return 0;
+    }
+    if (interlace != 0 && interlace != 1)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("unknown interlace type %d\n", interlace);
+        reset_chunks ();
+        return 0;
+    }
+
+/***  From PNG Specs, http://www.w3.org/TR/PNG-Chunks.html
+   Color    Allowed    Interpretation
+   Type    Bit Depths
+   ------  ----------  ----------------------------------
+   0       1,2,4,8,16  Each pixel is a grayscale sample.
+
+   2       8,16        Each pixel is an R,G,B triple.
+
+   3       1,2,4,8     Each pixel is a palette index;
+                       a PLTE chunk must appear.
+
+   4       8,16        Each pixel is a grayscale sample,
+                       followed by an alpha sample.
+
+   6       8,16        Each pixel is an R,G,B triple,
+                       followed by an alpha sample.
+***/
+
+    i = 0;
+
+    switch (colortype)
+    {
+        case 0:
+            if (bitdepth == 1 ||
+                bitdepth == 2 ||
+                bitdepth == 4 ||
+                bitdepth == 8 ||
+                bitdepth == 16)
+                i = 1;
+                bitspp = bitdepth;
+            break;
+        case 2:
+            if (bitdepth == 8 ||
+                bitdepth == 16)
+                i = 1;
+            bitspp = 3*bitdepth;
+            break;
+        case 3:
+            if (bitdepth == 1 ||
+                bitdepth == 2 ||
+                bitdepth == 4 ||
+                bitdepth == 8)
+                i = 1;
+            bitspp = bitdepth;
+            break;
+        case 4:
+            if (bitdepth == 8 ||
+                bitdepth == 16)
+                i = 1;
+            bitspp = 2*bitdepth;
+            break;
+        case 6:
+            if (bitdepth == 8 ||
+                bitdepth == 16)
+                i = 1;
+            bitspp = 4*bitdepth;
+            break;
+        default:
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("unknown color type %d\n", colortype);
+            reset_chunks ();
+            return 0;
+    }
+    if (!i)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("invalid bit depth %d for color type %d\n", bitdepth, colortype);
+        reset_chunks ();
+        return 0;
+    }
+
+    bytespline = (imgwidth*bitspp+7)/8;
+ /* Warning!
+    This value is only valid for 8/16 bit images! */
+    bytespp = (bitspp+7)/8;
+
+    if (flag_Verbose)
+    {
+        if (!didShowName)
+        {
+            didShowName = 1;
+            printf ("%s :\n", filename);
+        }
+        printf ("    image width        : %u\n", imgwidth);
+        printf ("    image height       : %u\n", imgheight);
+        printf ("    bit depth          : %u\n", bitdepth);
+        printf ("    color type         : %u\n", colortype);
+        printf ("    compression        : %u\n", compression);
+        printf ("    filter             : %u\n", filter);
+        printf ("    interlace          : %u\n", interlace);
+        printf ("    bits per pixel     : %d\n", bitspp);
+        printf ("    bytes per line     : %d\n", bytespline);
+    }
+
+    row_filter_bytes = imgheight;
+    if (interlace == 1)
+    {
+        int w,h,pass;
+
+        if (flag_Verbose)
+            printf ("    Adam7 interlacing:\n");
+
+        row_filter_bytes = 0;
+        for (pass=0; pass<7; pass++)
+        {
+            /* Formula taken from pngcheck ! */
+            w = (imgwidth - Starting_Col[pass] + Col_Increment[pass] - 1)/Col_Increment[pass];
+            h = (imgheight - Starting_Row[pass] + Row_Increment[pass] - 1)/Row_Increment[pass];
+            if (flag_Verbose)
+                printf ("      pass %d: %d x %d\n", pass, w, h);
+            row_filter_bytes += h;
+        }
+    }
+    if (flag_Verbose)
+    {
+        printf ("    row filter bytes   : %u\n", row_filter_bytes);
+        printf ("    expected data size : %u bytes\n", bytespline * imgheight + row_filter_bytes);
+    }
+
+    for (i=0; i<num_chunks; i++)
+    {
+        if (pngChunks[i].id == 0x49444154)  /* "IDAT" */
+        {
+            idat_first_index = i;
             break;
         }
     }
-
-    return APPLE_PNG_OK;
-}
-
-/*
-@!visibility protected
-Convert an Apple PNG data string to a standard PNG data string
-@note This sets #width and #height on the ApplePng instance as a side effect
-@param data [String] Binary string containing Apple PNG data
-@return [String] Binary string containing standard PNG data
-*/
-static VALUE ApplePng_convert_apple_png(VALUE self, VALUE data) {
-    int error;
-    VALUE ret;
-    const char *oldPNG = StringValuePtr(data);
-    size_t oldPNG_length = RSTRING_LEN(data);
-
-    dyn_arr *newPNG = dyn_arr_create(oldPNG_length);
-    if (newPNG == 0) {
-        rb_raise(rb_eNoMemError, "There was not enough memory to uncompress the PNG data.");
-    }
-
-    dyn_arr_append(newPNG, PNG_HEADER, 8);
-    error = readPngChunks(self, oldPNG, oldPNG_length, newPNG);
-    if (error != APPLE_PNG_OK) {
-        dyn_arr_free(newPNG);
-        switch (error) {
-        case APPLE_PNG_STREAM_ERROR:
-        case APPLE_PNG_DATA_ERROR:
+    if (i == num_chunks)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
         {
-            VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
-            rb_raise(eNotValidApplePng, "Could not process the input data. Please make sure this is valid Apple PNG format data.");
+            didShowName = 1;
+            printf ("%s : ", filename);
         }
-        case APPLE_PNG_ZLIB_VERSION_ERROR:
-            rb_raise(rb_eStandardError, "Unexpected Zlib version encountered. The caller was expecting Zlib " ZLIB_VERSION ".");
-        case APPLE_PNG_NO_MEM_ERROR:
-            rb_raise(rb_eNoMemError, "Ran out of memory while processing the PNG data.");
-        default:
-            rb_raise(rb_eStandardError, "An unexpected error was encountered while processing the PNG data. Please make sure the input is valid Apple PNG format data.");
+        printf ("no IDAT chunks found\n");
+        reset_chunks ();
+        return 0;
+    }
+/** Test for consecutive IDAT chunks */
+    /* continue where we left off */
+    while (i < num_chunks)
+    {
+        if (pngChunks[i].id != 0x49444154)  /* "IDAT" */
+            break;
+        total_idat_size += pngChunks[i].length;
+        i++;
+    }
+    /* test the remaining chunks */
+    while (i < num_chunks)
+    {
+        if (pngChunks[i].id == 0x49444154)  /* "IDAT" */
+            break;
+        i++;
+    }
+    if (i != num_chunks)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
         }
+        printf ("IDAT chunks are not consecutive\n");
+        reset_chunks ();
+        return 0;
     }
 
-    ret = rb_str_new(newPNG->arr, newPNG->used);
-    dyn_arr_free(newPNG);
-    return ret;
+    if (total_idat_size == 0)
+    {
+        if (didShowName)
+            printf ("    ");
+        else
+        {
+            didShowName = 1;
+            printf ("%s : ", filename);
+        }
+        printf ("all IDAT chunks are empty\n");
+        reset_chunks ();
+        return 0;
+    }
+
+/*  Only need to re-write the image data for -phone 8 bit RGB and RGBA images */
+/*  Note To Self: Is that true? What about 16 bit images? What about palette images? */
+/*  Okay -- checked the above, it appears these two do NOT get fried. */
+
+/*  Swap BGR to RGB, BGRA to RGBA */
+    if (bitdepth == 8 &&
+        (colortype == 2 ||      /* Each pixel is an R,G,B triple (8 or 16 bits) */
+        colortype == 6))        /* Each pixel is an R,G,B triple, followed by an alpha sample (8 or 16 bits) */
+    {
+        if (isPhoney && flag_Verbose)
+            printf ("    swapping BGR(A) to RGB(A)\n");
+
+    /*** Gather all IDATs into one ***/
+        if (flag_Debug)
+            printf ("    informational : total idat size: %u\n", total_idat_size);
+        all_idat = (unsigned char *)malloc (total_idat_size);
+        if (all_idat == NULL)
+        {
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("out of memory\n");
+            reset_chunks ();
+            return 0;
+        }
+        i = idat_first_index;
+        total_idat_size = 0;
+        while (i < num_chunks && pngChunks[i].id == 0x49444154) /* "IDAT" */
+        {
+            memcpy (all_idat+total_idat_size, pngChunks[i].data+4, pngChunks[i].length);
+            total_idat_size += pngChunks[i].length;
+            i++;
+        }
+
+    /*** So far everything appears to check out. Let's try uncompressing the IDAT chunks. ***/
+        data_out = (unsigned char *)malloc (bytespline * imgheight + row_filter_bytes);
+        if (data_out == NULL)
+        {
+            free (all_idat);
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("out of memory\n");
+            reset_chunks ();
+            return 0;
+        }
+
+        if (isPhoney)
+            out_length = tinfl_decompress_mem_to_mem(data_out, bytespline * imgheight + row_filter_bytes, all_idat, total_idat_size, 0);
+        else
+            out_length = tinfl_decompress_mem_to_mem(data_out, bytespline * imgheight + row_filter_bytes, all_idat, total_idat_size, TINFL_FLAG_PARSE_ZLIB_HEADER);
+
+        free (all_idat);
+        all_idat = NULL;
+
+        if (out_length <= 0)
+        {
+            free (data_out);
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("unspecified decompression error\n");
+            reset_chunks ();
+            return 0;
+        }
+
+        if (out_length != imgheight*bytespline + row_filter_bytes)
+        {
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("decompression error, expected %u but got %u bytes\n", imgheight*bytespline + row_filter_bytes, out_length);
+            free (data_out);
+            reset_chunks ();
+            return 0;
+        }
+        if (flag_Verbose)
+            printf ("    uncompressed size  : %u bytes\n", bytespline * imgheight + row_filter_bytes);
+
+        if (isPhoney || flag_Process_Anyway)
+        {
+            if (interlace == 1)     /* needs Adam7 unpacking! */
+            {
+                int x,y, b, row;
+                int pass, w,h;
+                int startat;
+
+            /*  check if all row filters are okay */
+                y = 0;
+                for (pass=0; pass<7; pass++)
+                {
+                    w = (imgwidth - Starting_Col[pass] + Col_Increment[pass] - 1)/Col_Increment[pass];
+                    h = (imgheight - Starting_Row[pass] + Row_Increment[pass] - 1)/Row_Increment[pass];
+                    row=0;
+                    while (row < h)
+                    {
+                        if (data_out[y] > 4)
+                        {
+                            free (data_out);
+                            if (didShowName)
+                                printf ("    ");
+                            else
+                            {
+                                didShowName = 1;
+                                printf ("%s : ", filename);
+                            }
+                            printf ("unknown row filter type (%d)\n", data_out[y]);
+                            reset_chunks ();
+                            return 0;
+                        }
+                        /* skip row filter byte */
+                        y++;
+                        /* skip rest of row */
+                        y += w * bytespp;
+                        row++;
+                    }
+                }
+
+
+                y = 0;
+                for (pass=0; pass<7; pass++)
+                {
+                    /* Formula taken from pngcheck ! */
+                    w = (imgwidth - Starting_Col[pass] + Col_Increment[pass] - 1)/Col_Increment[pass];
+                    h = (imgheight - Starting_Row[pass] + Row_Increment[pass] - 1)/Row_Increment[pass];
+                    startat = y;
+                    row=0;
+                    while (row < h)
+                    {
+                        /* skip row filter byte */
+                        y++;
+                        /* swap all bytes in this row */
+                        x = 0;
+                        while (x < w)
+                        {
+                            b = data_out[y+2];
+                            data_out[y+2] = data_out[y];
+                            data_out[y] = b;
+                            y += bytespp;
+                            x++;
+                        }
+                        row++;
+                    }
+                    if (isPhoney && flag_UpdateAlpha && colortype == 6) // RGBA
+                    {
+                        removeRowFilters (w, h, data_out+startat);
+                        demultiplyAlpha (w, h, data_out+startat);
+                        applyRowFilters (w, h, data_out+startat);
+                    }
+                }
+            } else
+            {
+                int x,y, b;
+
+                /* check row filters */
+                y = 0;
+                while (y < bytespline * imgheight + row_filter_bytes)
+                {
+                    if (data_out[y] > 4)
+                    {
+                        free (data_out);
+                        if (didShowName)
+                            printf ("    ");
+                        else
+                        {
+                            didShowName = 1;
+                            printf ("%s : ", filename);
+                        }
+                        printf ("unknown row filter type (%d)\n", data_out[y]);
+                        reset_chunks ();
+                        return 0;
+                    }
+                    /* skip row filter byte */
+                    y++;
+                    /* skip entire row */
+                    y += bytespline;
+                }
+
+                y = 0;
+                while (y < bytespline * imgheight + row_filter_bytes)
+                {
+                    /* skip row filter byte */
+                    y++;
+                    /* swap all bytes in this row */
+                    x = 0;
+                    while (x < imgwidth)
+                    {
+                        b = data_out[y+2];
+                        data_out[y+2] = data_out[y];
+                        data_out[y] = b;
+                        y += bytespp;
+                        x++;
+                    }
+                }
+                if (isPhoney && flag_UpdateAlpha && colortype == 6) // RGBA
+                {
+                    removeRowFilters (imgwidth, imgheight, data_out);
+                    demultiplyAlpha (imgwidth, imgheight, data_out);
+                    applyRowFilters (imgwidth, imgheight, data_out);
+                }
+            }
+        }
+
+    /*  Force VERY conservative repacking size ... */
+        repack_size = 2*(bytespline * imgheight + row_filter_bytes);
+        data_repack = (unsigned char *)malloc (repack_size);
+        if (data_repack == NULL)
+        {
+            free (data_out);
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("out of memory\n");
+            reset_chunks ();
+            return 0;
+        }
+
+        /* ouch -- reserve 4 bytes at the start to put "IDAT" in! */
+        /* yeah well, it beats having to re-allocate each block on writing ... */
+        repack_length = tdefl_compress_mem_to_mem(data_repack+4, repack_size-4, data_out, out_length, TDEFL_WRITE_ZLIB_HEADER);
+        if (repack_length == 0)
+        {
+            free (data_out);
+            free (data_repack);
+            if (didShowName)
+                printf ("    ");
+            else
+            {
+                didShowName = 1;
+                printf ("%s : ", filename);
+            }
+            printf ("unspecified compression error\n");
+            reset_chunks ();
+            return 0;
+        }
+
+        if (flag_Verbose)
+            printf ("    repacked size: %u bytes\n", repack_length);
+
+        free (data_out);
+    }
+
+    if (flag_Rewrite)
+    {
+        if (outputPath && outputPath[0])
+        {
+            char *clipOffPath;
+            clipOffPath = strrchr (filename, '/');
+            if (clipOffPath)
+                clipOffPath++;
+            else
+                clipOffPath = filename;
+
+            if (suffix && suffix[0])
+                write_file_name = (char *)malloc (strlen(outputPath)+strlen(clipOffPath)+strlen(suffix)+8);
+            else
+                write_file_name = (char *)malloc (strlen(outputPath)+strlen(clipOffPath)+8);
+            if (write_file_name == NULL)
+            {
+                if (didShowName)
+                    printf ("    ");
+                else
+                {
+                    didShowName = 1;
+                    printf ("%s : ", filename);
+                }
+                printf ("failed to allocate memory for output file name ...\n");
+                reset_chunks ();
+                return 0;
+            }
+            strcpy (write_file_name, outputPath);
+            strcat (write_file_name, "/");
+            strcat (write_file_name, clipOffPath);
+        } else
+        {
+            write_file_name = (char *)malloc (strlen(filename)+strlen(suffix)+8);
+            if (write_file_name == NULL)
+            {
+                if (didShowName)
+                    printf ("    ");
+                else
+                {
+                    didShowName = 1;
+                    printf ("%s : ", filename);
+                }
+                printf ("failed to allocate memory for output file name ...\n");
+                reset_chunks ();
+                return 0;
+            }
+            strcpy (write_file_name, filename);
+        }
+        if (suffix && suffix[0])
+        {
+            if (!strcasecmp (write_file_name+strlen(write_file_name)-4, ".png"))
+                strcpy (write_file_name+strlen(write_file_name)-4, suffix);
+            else
+                strcat (write_file_name, suffix);
+            strcat (write_file_name, ".png");
+        }
+
+        if (!didShowName)
+        {
+            printf ("%s : ", filename);
+        }
+        printf ("writing to file %s\n", write_file_name);
+
+        write_file = fopen (write_file_name, "wb");
+        if (!write_file)
+        {
+            printf ("    failed to create output file!\n");
+            reset_chunks ();
+            return 0;
+        }
+
+        fwrite (png_magic_bytes, 1, 8, write_file);
+
+        i = 0;
+        /* need to skip first bogus chunk */
+        /* at this point, I expect the first one to be IHDR! */
+        if (pngChunks[0].id == 0x43674249)  /* "CgBI" */
+            i++;
+        while (i < num_chunks && pngChunks[i].id != 0x49444154) /* "IDAT" */
+        {
+            fputc ( (pngChunks[i].length >> 24) & 0xff, write_file);
+            fputc ( (pngChunks[i].length >> 16) & 0xff, write_file);
+            fputc ( (pngChunks[i].length >>  8) & 0xff, write_file);
+            fputc ( (pngChunks[i].length      ) & 0xff, write_file);
+            fwrite (pngChunks[i].data, pngChunks[i].length+4, 1, write_file);
+            fputc ( (pngChunks[i].crc32 >> 24) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32 >> 16) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32 >>  8) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32      ) & 0xff, write_file);
+            i++;
+        }
+
+    /* Did we repack the data, or do we just need to rewrite the file? */
+        if (data_repack)
+        {
+            write_block_size = 0;
+            while (write_block_size < repack_length)
+            {
+                data_repack[4+write_block_size-4] = 'I';
+                data_repack[4+write_block_size-3] = 'D';
+                data_repack[4+write_block_size-2] = 'A';
+                data_repack[4+write_block_size-1] = 'T';
+                if (repack_length-write_block_size > repack_IDAT_size)
+                {
+                    fputc ( (repack_IDAT_size >> 24) & 0xff, write_file);
+                    fputc ( (repack_IDAT_size >> 16) & 0xff, write_file);
+                    fputc ( (repack_IDAT_size >>  8) & 0xff, write_file);
+                    fputc ( (repack_IDAT_size      ) & 0xff, write_file);
+                    fwrite ( data_repack+write_block_size, repack_IDAT_size+4,1, write_file);
+                    crc = crc32s (data_repack+write_block_size, repack_IDAT_size+4);
+                    fputc ( (crc >> 24) & 0xff, write_file);
+                    fputc ( (crc >> 16) & 0xff, write_file);
+                    fputc ( (crc >>  8) & 0xff, write_file);
+                    fputc ( (crc      ) & 0xff, write_file);
+                    write_block_size += repack_IDAT_size;
+                } else
+                {
+                    fputc ( ((repack_length-write_block_size) >> 24) & 0xff, write_file);
+                    fputc ( ((repack_length-write_block_size) >> 16) & 0xff, write_file);
+                    fputc ( ((repack_length-write_block_size) >>  8) & 0xff, write_file);
+                    fputc ( ((repack_length-write_block_size)      ) & 0xff, write_file);
+                    fwrite ( data_repack+write_block_size, (repack_length-write_block_size)+4,1, write_file);
+                    crc = crc32s (data_repack+write_block_size, (repack_length-write_block_size)+4);
+                    fputc ( (crc >> 24) & 0xff, write_file);
+                    fputc ( (crc >> 16) & 0xff, write_file);
+                    fputc ( (crc >>  8) & 0xff, write_file);
+                    fputc ( (crc      ) & 0xff, write_file);
+                    write_block_size = repack_length;
+                }
+            }
+
+            /* skip original IDAT chunks */
+            while (i < num_chunks && pngChunks[i].id == 0x49444154) /* "IDAT" */
+                i++;
+
+            free (data_repack);
+        } else
+        {
+            /* image was not repacked */
+            /* output original IDAT chunks */
+            while (i < num_chunks && pngChunks[i].id == 0x49444154) /* "IDAT" */
+            {
+                fputc ( (pngChunks[i].length >> 24) & 0xff, write_file);
+                fputc ( (pngChunks[i].length >> 16) & 0xff, write_file);
+                fputc ( (pngChunks[i].length >>  8) & 0xff, write_file);
+                fputc ( (pngChunks[i].length      ) & 0xff, write_file);
+                fwrite (pngChunks[i].data, pngChunks[i].length+4, 1, write_file);
+                fputc ( (pngChunks[i].crc32 >> 24) & 0xff, write_file);
+                fputc ( (pngChunks[i].crc32 >> 16) & 0xff, write_file);
+                fputc ( (pngChunks[i].crc32 >>  8) & 0xff, write_file);
+                fputc ( (pngChunks[i].crc32      ) & 0xff, write_file);
+                i++;
+            }
+        }
+
+        /* output remaining chunks */
+        while (i < num_chunks)
+        {
+            fputc ( (pngChunks[i].length >> 24) & 0xff, write_file);
+            fputc ( (pngChunks[i].length >> 16) & 0xff, write_file);
+            fputc ( (pngChunks[i].length >>  8) & 0xff, write_file);
+            fputc ( (pngChunks[i].length      ) & 0xff, write_file);
+            fwrite (pngChunks[i].data, pngChunks[i].length+4, 1, write_file);
+            fputc ( (pngChunks[i].crc32 >> 24) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32 >> 16) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32 >>  8) & 0xff, write_file);
+            fputc ( (pngChunks[i].crc32      ) & 0xff, write_file);
+            i++;
+        }
+        fclose (write_file);
+        free (write_file_name);
+        reset_chunks ();
+
+        return 1;
+    }
+
+/* We come here if nothing was written */
+/* Just show the name and go away */
+    if (!didShowName)
+    {
+        printf ("%s\n", filename);
+    }
+
+    if (data_repack)
+        free (data_repack);
+
+    reset_chunks ();
+    return 0;
 }
 
 /*
@@ -389,8 +1340,20 @@ static VALUE ApplePng_get_dimensions(VALUE self, VALUE data) {
     rb_raise(eNotValidApplePng, "Input data is not a valid PNG file (missing IHDR chunk).");
 }
 
+/*
+@!visibility protected
+Convert an Apple PNG data string to a standard PNG data string
+@note This sets #width and #height on the ApplePng instance as a side effect
+@param data [String] Binary string containing filename.
+@return [String] Binary string containing standard PNG data
+*/
+static VALUE ApplePng_convert_apple_png(VALUE self, VALUE filename, VALUE outFilename) {
+    outputPath = StringValuePtr(outFilename);
+    process(StringValuePtr(filename));
+}
+
 void Init_apple_png(void) {
   VALUE klass = rb_define_class("ApplePng", rb_cObject);
-  rb_define_protected_method(klass, "convert_apple_png", ApplePng_convert_apple_png, 1);
+  rb_define_protected_method(klass, "convert_apple_png", ApplePng_convert_apple_png, 2);
   rb_define_protected_method(klass, "get_dimensions", ApplePng_get_dimensions, 1);
 }
