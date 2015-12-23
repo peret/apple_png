@@ -19,7 +19,7 @@ int flag_Debug = 0;
 int flag_UpdateAlpha = 1;
 int repack_IDAT_size = 524288;  /* 512K -- seems a bit much to me, axually, but have seen this used */
 
-int flag_Rewrite = 0;
+int flag_Rewrite = 1;
 
 char *suffix = NULL;
 char *outputPath = NULL;
@@ -598,6 +598,8 @@ int process (char *filename)
         reset_chunks ();
         return 0;
     }
+    printf("READING IMAGE INFORMATION\n");
+
     imgwidth = read_long (&ihdr_chunk->data[4]);
     imgheight = read_long (&ihdr_chunk->data[8]);
     bitdepth = ihdr_chunk->data[12];
@@ -1116,6 +1118,9 @@ int process (char *filename)
 
         free (data_out);
     }
+
+    printf("SO FAR SO GOOD");
+
 
     if (flag_Rewrite)
     {
