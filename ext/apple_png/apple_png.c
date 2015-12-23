@@ -373,6 +373,7 @@ void applyRowFilters (int wide, int high, unsigned char *data)
 
 int process (char *filename)
 {
+    printf("process called with filename: %s\n", filename);
     VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
 
     FILE *f;
