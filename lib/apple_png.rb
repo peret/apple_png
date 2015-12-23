@@ -33,7 +33,7 @@ class ApplePng
       result_file = File.join(tmpdir, 'outimage.png')
 
       convert_apple_png(apple_png_file, result_file)
-      result_file.read
+      File.read(result_file)
     end
   end
 end
