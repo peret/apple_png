@@ -31,9 +31,9 @@ class ApplePng
       File.open(apple_png_file, 'wb') do |file|
         file.write(@raw_data)
       end
-      result_file = File.join(tmpdir, 'outimage.png')
+      result_file = File.join(tmpdir, 'apple_converted.png')
 
-      convert_apple_png(apple_png_file, result_file)
+      convert_apple_png(apple_png_file, '_converted')
       File.read(result_file)
     end
   end
