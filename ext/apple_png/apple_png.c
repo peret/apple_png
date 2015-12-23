@@ -25,8 +25,6 @@ char *suffix = NULL;
 char *outputPath = NULL;
 
 unsigned char png_magic_bytes[] = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A";
-VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
-
 
 /** Chunk data comes here **/
 
@@ -375,6 +373,8 @@ void applyRowFilters (int wide, int high, unsigned char *data)
 
 int process (char *filename)
 {
+    VALUE eNotValidApplePng = rb_path2class("NotValidApplePngError");
+
     FILE *f;
     unsigned int length;
     int i;
