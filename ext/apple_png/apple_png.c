@@ -1351,9 +1351,9 @@ Convert an Apple PNG data string to a standard PNG data string
 @return [String] Binary string containing standard PNG data
 */
 static VALUE ApplePng_convert_apple_png(VALUE self, VALUE filename, VALUE outFilename) {
-    printf("convert_apple_png called with filename:");
+    printf("convert_apple_png called with filename:\n");
     outputPath = StringValuePtr(outFilename);
-    printf("%s\n", filename);
+    printf("%s\n", outputPath);
     process(StringValuePtr(filename));
 }
 
